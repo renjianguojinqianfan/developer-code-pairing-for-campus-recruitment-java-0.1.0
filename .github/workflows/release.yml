@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_number=${VERSION#v}" >> $GITHUB_OUTPUT
+
+      - name: Update version in build.gradle.kts
+        run: |
+          sed -i 's/version = ".*"/version = "${{ steps.get_version.outputs.version_number }}"/' app/build.gradle.kts
+
+      - name: Run all tests
+        run: ./gradlew test integrationTest contractTest
+
+      - name: Verify test coverage
+        run: ./gradlew jacocoTestCoverageVerification
+
+      - name: Build project
+        run: ./gradlew build -x test -x integrationTest -x contractTest
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            CHANGELOG=$(cat CHANGELOG.md)
+          else
+            CHANGELOG="Release ${{ steps.get_version.outputs.version }}"
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          name: Release ${{ steps.get_version.outputs.version }}
+          body: |
+            ## 🚀 Release ${{ steps.get_version.outputs.version }}
+            
+            ### 📦 构建信息
+            - **版本**: ${{ steps.get_version.outputs.version_number }}
+            - **构建时间**: ${{ github.event.head_commit.timestamp }}
+            - **提交**: ${{ github.sha }}
+            
+            ### ✅ 质量检查
+            - ✓ 所有测试通过（单元测试、集成测试、契约测试）
+            - ✓ 代码覆盖率达到 70% 要求
+            - ✓ 代码格式检查通过
+            
+            ### 📥 下载说明
+            - **JAR 文件**: 可直接运行的应用程序包
+            - **Source code**: 完整的项目源代码
+            
+            ### 🎓 教学使用
+            本项目可作为 Spring Boot 教学模板使用，包含：
+            - DDD 架构设计
+            - 多层测试策略
+            - Spring Cloud Contract 契约测试
+            - JaCoCo 代码覆盖率
+            - Spotless 代码格式化
+          files: |
+            app/build/libs/*.jar
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.get_version.outputs.version }}
+          path: |
+            app/build/libs/*.jar
+            app/build/reports/
+          retention-days: 90
